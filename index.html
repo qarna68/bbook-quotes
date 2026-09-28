@@ -30,27 +30,43 @@ summary{cursor:pointer}
 .q p{font-family:Amiri,serif;font-size:1.3rem;line-height:1.9;margin:0 0 6px}
 .q small{display:block;color:var(--mute);margin-bottom:10px}
 .q button.ghost.done{color:var(--ok);border-color:var(--ok)}
+[hidden]{display:none!important}
+.tabs{display:flex;gap:8px;margin-bottom:12px}
+.tab{flex:1;background:transparent;color:var(--mute);border:1px solid var(--line);font-weight:500}
+.tab.on{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+input[type=file]{padding:10px}
 </style>
 </head>
 <body>
 <main>
   <h1>اقتباسات من كتاب</h1>
+  <div class="tabs"><button class="tab on" id="t1">من ذاكرة النموذج</button><button class="tab" id="t2">من ملف الكتاب</button></div>
   <div class="form">
-    <input id="book" placeholder="اسم الكتاب" autocomplete="off">
-    <input id="author" placeholder="اسم المؤلف" autocomplete="off">
+    <div id="p1" class="form">
+      <input id="book" placeholder="اسم الكتاب" autocomplete="off">
+      <input id="author" placeholder="اسم المؤلف" autocomplete="off">
+    </div>
+    <div id="p2" class="form" hidden>
+      <input id="file" type="file" accept=".txt,.pdf,.epub">
+      <select id="depth" aria-label="العمق">
+        <option value="20">سريع: 20 مقطعًا موزعة على الكتاب</option>
+        <option value="50">متوسط: 50 مقطعًا</option>
+        <option value="0">الكتاب كاملًا (بطيء)</option>
+      </select>
+    </div>
     <input id="key" type="password" placeholder="مفتاح Groq API (يُطلب في كل مرة ولا يُحفظ)" autocomplete="off" autocapitalize="off" spellcheck="false">
     <select id="model" aria-label="النموذج"><option value="openai/gpt-oss-120b">النموذج: openai/gpt-oss-120b</option></select>
     <button id="go">استخرج 10 اقتباسات</button>
+    <button id="stop" class="ghost" hidden>إيقاف</button>
   </div>
   <div id="status" role="status"></div>
   <div id="out"></div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
-const MODEL = "llama-3.3-70b-versatile";
-let quotes = [], meta = "";
-
-
+const API = "https://api.groq.com/openai/v1/chat/completions";
+let quotes = [], meta = "", mode = 1, stopFlag = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 function status(msg, err) { $("status").textContent = msg; $("status").className = err ? "err" : ""; }
 
 async function copy(text, btn) {
@@ -95,29 +111,46 @@ $("key").addEventListener("change", async () => {
   } catch (e) {}
 });
 
-async function ask(prompt, key, model) {
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
-  const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, temperature: 0.4, messages: [{ role: "user", content: prompt }] })
-  })]);
-  if (!r.ok) {
+
+async function chat(prompt, key, model, temp) {
+  for (let n = 0; n < 6; n++) {
+    if (stopFlag) throw Object.assign(new Error("stopped"), { name: "Stopped" });
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
+    const r = await Promise.race([timeout, fetch(API, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, temperature: temp, messages: [{ role: "user", content: prompt }] })
+    })]);
+    if (r.ok) return (await r.json()).choices[0].message.content || "";
     let m = ""; try { m = (await r.json()).error.message; } catch (_) {}
+    if (r.status === 429) {
+      if (/per day|TPD/i.test(m)) throw new Error("انتهى الحد اليومي لحسابك في Groq. أعد المحاولة لاحقًا أو اختر عددًا أقل من المقاطع.");
+      const x = /try again in ([\d.]+)(ms|s|m)/.exec(m); let w = 15000;
+      if (x) w = parseFloat(x[1]) * (x[2] === "ms" ? 1 : x[2] === "s" ? 1000 : 60000) + 1000;
+      status("بلغتَ حد السرعة في Groq، انتظار " + Math.ceil(w / 1000) + " ثانية...");
+      await sleep(Math.min(w, 90000)); continue;
+    }
     throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status + (m ? ": " + m : ""));
   }
-  const data = await r.json();
-  const raw = data.choices[0].message.content || "";
-  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
-  if (a < 0 || b < 0) return [];
-  return (JSON.parse(raw.slice(a, b + 1)).quotes || []).filter(q => q && q.quote);
+  throw new Error("تعذّر الإكمال بسبب حدود السرعة. جرّب عددًا أقل من المقاطع.");
 }
+function parseJSON(raw) {
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a < 0 || b < 0) return null;
+  try { return JSON.parse(raw.slice(a, b + 1)); } catch (e) { return null; }
+}
+const pick = (arr, n) => n && arr.length > n ? Array.from({ length: n }, (_, i) => arr[Math.floor(i * arr.length / n)]) : arr;
+const norm = t => t.toLowerCase().replace(/[\u064B-\u065F\u0670\u0640]/g, "").replace(/[إأآ]/g, "ا").replace(/[\s.,،؛:!?؟"'«»()\-–—]/g, "");
 
-$("go").onclick = async () => {
-  const book = $("book").value.trim(), author = $("author").value.trim(), key = $("key").value.trim();
-  if (!key) return status("أدخل مفتاح Groq API.", true);
-  if (!book || !author) return status("أدخل اسم الكتاب واسم المؤلف.", true);
+function setMode(m) {
+  mode = m; $("t1").classList.toggle("on", m === 1); $("t2").classList.toggle("on", m === 2);
+  $("p1").hidden = m !== 1; $("p2").hidden = m !== 2;
+  $("go").textContent = m === 1 ? "استخرج 10 اقتباسات" : "استخرج الاقتباسات من الملف";
+}
+$("t1").onclick = () => setMode(1); $("t2").onclick = () => setMode(2);
 
+/* ---- من ذاكرة النموذج ---- */
+async function runMemory(book, author, key, model) {
   const FORMAT = 'أعد JSON فقط بهذا الشكل: {"quotes":[{"quote":"...","confidence":"high","note":"سياق قصير اختياري"}]}';
   const p1 = `أنت خبير في الأدب العربي والعالمي. أعطني حتى 10 اقتباسات جميلة من كتاب "${book}" للمؤلف "${author}".
 القواعد:
@@ -129,19 +162,106 @@ $("go").onclick = async () => {
 ` + FORMAT;
   const p2 = `الكتاب "${book}" للمؤلف "${author}" كتاب معروف. اذكر أبرز الأفكار والعبارات التي اشتهر بها، في صورة اقتباسات قصيرة بلغته الأصلية، بأقرب صياغة تتذكرها. اجعل confidence دائمًا "approx" ولا تختلق أحداثًا غير موجودة في الكتاب.
 ` + FORMAT;
+  const get = async p => { const j = parseJSON(await chat(p, key, model, 0.4)); return ((j && j.quotes) || []).filter(q => q && q.quote); };
+  quotes = await get(p1);
+  if (!quotes.length) { status("محاولة ثانية..."); quotes = await get(p2); }
+  meta = book + "، " + author;
+}
 
-  $("go").disabled = true; quotes = []; render(); status("جارٍ استخراج الاقتباسات...");
+/* ---- من ملف الكتاب ---- */
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = src; s.onload = res;
+    s.onerror = () => rej(new Error("تعذّر تحميل مكتبة قراءة الملف، تحقق من الإنترنت."));
+    document.head.appendChild(s);
+  });
+}
+async function readFile(f) {
+  const ext = f.name.split(".").pop().toLowerCase(), buf = await f.arrayBuffer();
+  if (ext === "txt") {
+    let t = new TextDecoder("utf-8").decode(buf);
+    if ((t.match(/\uFFFD/g) || []).length > 20) t = new TextDecoder("windows-1256").decode(buf);
+    return t;
+  }
+  if (ext === "pdf") {
+    const base = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+    if (!window.pdfjsLib) { await loadScript(base + "pdf.min.js"); pdfjsLib.GlobalWorkerOptions.workerSrc = base + "pdf.worker.min.js"; }
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise, out = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      if (i % 5 === 1) status("قراءة الصفحة " + i + " من " + pdf.numPages + "...");
+      const c = await (await pdf.getPage(i)).getTextContent();
+      out.push(c.items.map(x => x.str).join(" "));
+    }
+    return out.join("\n").normalize("NFKC");
+  }
+  if (ext === "epub") {
+    if (!window.JSZip) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+    const z = await JSZip.loadAsync(buf), out = [];
+    for (const n of Object.keys(z.files).filter(n => /\.(x?html?)$/i.test(n)).sort())
+      out.push(new DOMParser().parseFromString(await z.files[n].async("string"), "text/html").body.textContent);
+    return out.join("\n");
+  }
+  throw new Error("صيغة غير مدعومة. استخدم txt أو pdf أو epub.");
+}
+function chunkText(t) {
+  t = t.replace(/\s+/g, " ").trim(); const out = []; let i = 0;
+  while (i < t.length) {
+    let e = Math.min(i + 5000, t.length);
+    if (e < t.length) { const k = Math.max(t.lastIndexOf(". ", e), t.lastIndexOf("؟ ", e), t.lastIndexOf("! ", e)); if (k > i + 3000) e = k + 1; }
+    const c = t.slice(i, e).trim(); if (c.length > 500) out.push(c); i = e;
+  }
+  return out;
+}
+async function runFile(key, model) {
+  const f = $("file").files[0];
+  status("قراءة الملف...");
+  const text = await readFile(f);
+  if (text.replace(/\s/g, "").length < 2000) throw new Error("لم أستطع استخراج نص كافٍ من الملف (قد يكون صورًا ممسوحة ضوئيًا).");
+  const chunks = pick(chunkText(text), +$("depth").value), cands = [];
+  for (let i = 0; i < chunks.length && !stopFlag; i++) {
+    status("تحليل المقطع " + (i + 1) + " من " + chunks.length + " (مرشّح حتى الآن: " + cands.length + ")");
+    try {
+      const raw = await chat(`النص التالي مقطع من كتاب. اختر منه حتى جملتين هما الأجمل والأعمق، بحيث تصلح كل منهما اقتباسًا مستقلًا مفهومًا دون سياق (بين 40 و250 حرفًا). انسخ كل جملة حرفيًا كما هي في النص دون أي تعديل أو اختصار. إن لم تجد شيئًا جديرًا فأعد قائمة فارغة.
+أعد JSON فقط: {"quotes":["..."]}
+
+النص:
+` + chunks[i], key, model, 0);
+      const j = parseJSON(raw), nc = norm(chunks[i]);
+      ((j && j.quotes) || []).forEach(q => { if (typeof q === "string" && q.length >= 30 && q.length <= 400 && nc.includes(norm(q))) cands.push(q.trim()); });
+    } catch (e) { if (e.name === "Stopped") break; if (e.name === "TimeoutError") continue; throw e; }
+  }
+  if (!cands.length) throw new Error("لم أحصل على اقتباسات مطابقة لنص الكتاب. جرّب نموذجًا آخر أو ملفًا أوضح.");
+  let final = pick(cands, 10);
+  if (cands.length > 10) {
+    status("اختيار أجمل 10 اقتباسات...");
+    stopFlag = false;
+    const pool = pick(cands, 80);
+    try {
+      const j = parseJSON(await chat("هذه اقتباسات من كتاب. اختر أجمل 10 منها (الأعمق معنى والأجمل صياغة والأوضح دون سياق)، ولا تكرر فكرة واحدة. أعد JSON فقط: {\"picks\":[أرقام]}\n\n" + pool.map((q, i) => (i + 1) + ". " + q).join("\n"), key, model, 0));
+      const sel = [...new Set(((j && j.picks) || []).map(n => pool[n - 1]).filter(Boolean))].slice(0, 10);
+      if (sel.length) final = sel;
+    } catch (e) {}
+  }
+  quotes = final.map(q => ({ quote: q, note: "نص حرفي من الكتاب" }));
+  meta = f.name.replace(/\.[^.]+$/, "");
+}
+
+$("go").onclick = async () => {
+  const key = $("key").value.trim(), model = $("model").value;
+  if (!key) return status("أدخل مفتاح Groq API.", true);
+  const book = $("book").value.trim(), author = $("author").value.trim();
+  if (mode === 1 && (!book || !author)) return status("أدخل اسم الكتاب واسم المؤلف.", true);
+  if (mode === 2 && !$("file").files[0]) return status("اختر ملف الكتاب أولًا.", true);
+  stopFlag = false; $("go").disabled = true; $("stop").hidden = mode !== 2; quotes = []; render(); status("جارٍ العمل...");
   try {
-    const model = $("model").value;
-    quotes = await ask(p1, key, model);
-    if (!quotes.length) { status("محاولة ثانية..."); quotes = await ask(p2, key, model); }
-    meta = book + "، " + author;
-    if (!quotes.length) status("لم يتعرّف النموذج على هذا الكتاب. جرّب كتابة الاسم كما هو مشهور، أو كتابًا آخر.");
-    else { status("تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ."); render(); }
+    if (mode === 1) await runMemory(book, author, key, model); else await runFile(key, model);
+    if (!quotes.length) status("لم يتعرّف النموذج على هذا الكتاب. جرّب كتابة الاسم كما هو مشهور، أو استخدم «من ملف الكتاب».");
+    else { status(mode === 1 ? "تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ." : "اقتباسات حرفية تم التحقق من وجودها في نص الكتاب."); render(); }
   } catch (e) {
-    status(e.name === "TimeoutError" ? "انتهت المهلة (60 ثانية). تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
-  } finally { $("go").disabled = false; }
+    status(e.name === "TimeoutError" ? "انتهت المهلة. تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
+  } finally { $("go").disabled = false; $("stop").hidden = true; }
 };
+$("stop").onclick = () => { stopFlag = true; status("جارٍ الإيقاف وعرض ما تم استخراجه..."); };
 </script>
 </body>
 </html>
