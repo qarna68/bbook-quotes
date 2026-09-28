@@ -15,8 +15,8 @@ body{background:var(--bg);color:var(--ink);font-family:Tajawal,system-ui,sans-se
 main{max-width:640px;margin:0 auto}
 h1{font-family:Amiri,serif;font-size:2rem;margin:8px 0 16px}
 .form{display:grid;gap:10px}
-input{width:100%;font:inherit;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
-input:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+input,select{width:100%;font:inherit;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:12px 16px;background:var(--acc);color:var(--acc-ink);font-weight:700}
 button:disabled{opacity:.6;cursor:wait}
 button.ghost{background:transparent;color:var(--acc);border:1px solid var(--line);padding:6px 12px;font-weight:500}
@@ -39,6 +39,7 @@ summary{cursor:pointer}
     <input id="book" placeholder="اسم الكتاب" autocomplete="off">
     <input id="author" placeholder="اسم المؤلف" autocomplete="off">
     <input id="key" type="password" placeholder="مفتاح Groq API (يُطلب في كل مرة ولا يُحفظ)" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <select id="model" aria-label="النموذج"><option value="openai/gpt-oss-120b">النموذج: openai/gpt-oss-120b</option></select>
     <button id="go">استخرج 10 اقتباسات</button>
   </div>
   <div id="status" role="status"></div>
@@ -81,12 +82,25 @@ function render() {
   });
 }
 
-async function ask(prompt, key) {
+$("key").addEventListener("change", async () => {
+  const key = $("key").value.trim(); if (!key) return;
+  try {
+    const r = await fetch("https://api.groq.com/openai/v1/models", { headers: { "Authorization": "Bearer " + key } });
+    if (!r.ok) return;
+    const ids = (await r.json()).data.map(m => m.id).filter(id => !/whisper|tts|orpheus|guard|embed|safeguard/i.test(id)).sort();
+    if (!ids.length) return;
+    const sel = $("model"), cur = sel.value; sel.innerHTML = "";
+    ids.forEach(id => { const o = document.createElement("option"); o.value = id; o.textContent = "النموذج: " + id; sel.appendChild(o); });
+    sel.value = ids.includes(cur) ? cur : ids[0];
+  } catch (e) {}
+});
+
+async function ask(prompt, key, model) {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
   const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai/gpt-oss-120b", temperature: 0.4, messages: [{ role: "user", content: prompt }] })
+    body: JSON.stringify({ model, temperature: 0.4, messages: [{ role: "user", content: prompt }] })
   })]);
   if (!r.ok) {
     let m = ""; try { m = (await r.json()).error.message; } catch (_) {}
@@ -118,8 +132,9 @@ $("go").onclick = async () => {
 
   $("go").disabled = true; quotes = []; render(); status("جارٍ استخراج الاقتباسات...");
   try {
-    quotes = await ask(p1, key);
-    if (!quotes.length) { status("محاولة ثانية..."); quotes = await ask(p2, key); }
+    const model = $("model").value;
+    quotes = await ask(p1, key, model);
+    if (!quotes.length) { status("محاولة ثانية..."); quotes = await ask(p2, key, model); }
     meta = book + "، " + author;
     if (!quotes.length) status("لم يتعرّف النموذج على هذا الكتاب. جرّب كتابة الاسم كما هو مشهور، أو كتابًا آخر.");
     else { status("تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ."); render(); }
