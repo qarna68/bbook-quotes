@@ -97,23 +97,28 @@ $("go").onclick = async () => {
 
   $("go").disabled = true; quotes = []; render(); status("جارٍ استخراج الاقتباسات...");
   try {
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 40000));
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
     const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile", temperature: 0.3, response_format: { type: "json_object" },
+        model: "openai/gpt-oss-120b", temperature: 0.3,
         messages: [{ role: "user", content: prompt }]
       })
     })]);
-    if (!r.ok) throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status);
+    if (!r.ok) {
+      let m = ""; try { m = (await r.json()).error.message; } catch (_) {}
+      throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status + (m ? ": " + m : ""));
+    }
     const data = await r.json();
-    quotes = (JSON.parse(data.choices[0].message.content).quotes || []).filter(q => q && q.quote);
+    const raw = data.choices[0].message.content || "";
+    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+    quotes = (JSON.parse(raw.slice(a, b + 1)).quotes || []).filter(q => q && q.quote);
     meta = book + "، " + author;
     if (!quotes.length) status("لم أجد اقتباسات موثوقة لهذا الكتاب.");
     else { status("تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ."); render(); }
   } catch (e) {
-    status(e.name === "TimeoutError" ? "انتهت المهلة (40 ثانية). تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
+    status(e.name === "TimeoutError" ? "انتهت المهلة (60 ثانية). تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
   } finally { $("go").disabled = false; }
 };
 </script>
