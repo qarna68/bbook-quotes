@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>اقتباسات الكتب</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Tajawal:wght@400;500;700&display=swap">
+<style>
+:root{--bg:#eef2f4;--card:#fff;--ink:#12212b;--mute:#5d6c76;--line:#d5dde2;--acc:#0e6b73;--acc-ink:#fff;--ok:#1b7f4b}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1a20;--card:#17262e;--ink:#e8eef1;--mute:#93a5af;--line:#28404b;--acc:#4fc3cc;--acc-ink:#062226;--ok:#5fd394}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:Tajawal,system-ui,sans-serif;line-height:1.7;padding:max(16px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}
+main{max-width:640px;margin:0 auto}
+h1{font-family:Amiri,serif;font-size:2rem;margin:8px 0 16px}
+.form{display:grid;gap:10px}
+input{width:100%;font:inherit;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+input:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:12px 16px;background:var(--acc);color:var(--acc-ink);font-weight:700}
+button:disabled{opacity:.6;cursor:wait}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--line);padding:6px 12px;font-weight:500}
+details{margin-top:12px;color:var(--mute);font-size:.9rem}
+summary{cursor:pointer}
+#status{margin:16px 0;color:var(--mute)}
+#status.err{color:#c0392b}
+.bar{display:flex;justify-content:space-between;align-items:center;margin:20px 0 8px}
+.q{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+.q{border-inline-start:4px solid var(--acc)}
+.q p{font-family:Amiri,serif;font-size:1.3rem;line-height:1.9;margin:0 0 6px}
+.q small{display:block;color:var(--mute);margin-bottom:10px}
+.q button.ghost.done{color:var(--ok);border-color:var(--ok)}
+</style>
+</head>
+<body>
+<main>
+  <h1>اقتباسات من كتاب</h1>
+  <div class="form">
+    <input id="book" placeholder="اسم الكتاب" autocomplete="off">
+    <input id="author" placeholder="اسم المؤلف" autocomplete="off">
+    <input id="key" type="password" placeholder="مفتاح Groq API (يُطلب في كل مرة ولا يُحفظ)" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="go">استخرج 10 اقتباسات</button>
+  </div>
+  <div id="status" role="status"></div>
+  <div id="out"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const MODEL = "llama-3.3-70b-versatile";
+let quotes = [], meta = "";
+
+
+function status(msg, err) { $("status").textContent = msg; $("status").className = err ? "err" : ""; }
+
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select();
+    try { document.execCommand("copy"); } catch (_) {} t.remove();
+  }
+  const old = btn.textContent; btn.textContent = "تم النسخ"; btn.classList.add("done");
+  setTimeout(() => { btn.textContent = old; btn.classList.remove("done"); }, 1500);
+}
+
+function render() {
+  const out = $("out"); out.innerHTML = "";
+  if (!quotes.length) return;
+  const bar = document.createElement("div"); bar.className = "bar";
+  bar.innerHTML = "<span>" + meta + "</span>";
+  const all = document.createElement("button"); all.className = "ghost"; all.textContent = "نسخ الكل";
+  all.onclick = () => copy(quotes.map((q, i) => (i + 1) + ". " + q.quote).join("\n\n") + "\n\n— " + meta, all);
+  bar.appendChild(all); out.appendChild(bar);
+  quotes.forEach(q => {
+    const d = document.createElement("div"); d.className = "q";
+    const p = document.createElement("p"); p.dir = "auto"; p.textContent = q.quote; d.appendChild(p);
+    const nt = [q.note, q.confidence === "approx" && !/الصياغة/.test(q.note || "") ? "قد تختلف الصياغة عن النص الأصلي" : ""].filter(Boolean).join(" — ");
+    if (nt) { const s = document.createElement("small"); s.textContent = nt; d.appendChild(s); }
+    const b = document.createElement("button"); b.className = "ghost"; b.textContent = "نسخ";
+    b.onclick = () => copy(q.quote + "\n— " + meta, b);
+    d.appendChild(b); out.appendChild(d);
+  });
+}
+
+$("go").onclick = async () => {
+  const book = $("book").value.trim(), author = $("author").value.trim(), key = $("key").value.trim();
+  if (!key) return status("أدخل مفتاح Groq API.", true);
+  if (!book || !author) return status("أدخل اسم الكتاب واسم المؤلف.", true);
+
+  const prompt = `أنت مساعد أدبي دقيق. أعطني حتى 10 اقتباسات جميلة من كتاب "${book}" للمؤلف "${author}".
+القواعد:
+- اكتب الاقتباس بلغة الكتاب الأصلية؛ إن كان الكتاب عربيًا فاكتبه بالفصحى كما ورد قدر الإمكان.
+- اذكر ما تتذكره فعلًا من الكتاب أو من العبارات المشهورة المنسوبة إليه، ولا تختلق عبارات جديدة.
+- ضع confidence بقيمة "high" إن كنت واثقًا من النص، أو "approx" إن كنت واثقًا من المعنى والنسبة لكن الصياغة قد تختلف قليلًا.
+- إن لم تعرف الكتاب أصلًا فأعد قائمة فارغة.
+- كل اقتباس جملة أو جملتان.
+أعد JSON فقط بهذا الشكل: {"quotes":[{"quote":"...","confidence":"high","note":"سياق قصير اختياري"}]}`;
+
+  $("go").disabled = true; quotes = []; render(); status("جارٍ استخراج الاقتباسات...");
+  try {
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 40000));
+    const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile", temperature: 0.3, response_format: { type: "json_object" },
+        messages: [{ role: "user", content: prompt }]
+      })
+    })]);
+    if (!r.ok) throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status);
+    const data = await r.json();
+    quotes = (JSON.parse(data.choices[0].message.content).quotes || []).filter(q => q && q.quote);
+    meta = book + "، " + author;
+    if (!quotes.length) status("لم أجد اقتباسات موثوقة لهذا الكتاب.");
+    else { status("تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ."); render(); }
+  } catch (e) {
+    status(e.name === "TimeoutError" ? "انتهت المهلة (40 ثانية). تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
+  } finally { $("go").disabled = false; }
+};
+</script>
+</body>
+</html>
