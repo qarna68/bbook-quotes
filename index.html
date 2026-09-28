@@ -81,41 +81,47 @@ function render() {
   });
 }
 
+async function ask(prompt, key) {
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
+  const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "openai/gpt-oss-120b", temperature: 0.4, messages: [{ role: "user", content: prompt }] })
+  })]);
+  if (!r.ok) {
+    let m = ""; try { m = (await r.json()).error.message; } catch (_) {}
+    throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status + (m ? ": " + m : ""));
+  }
+  const data = await r.json();
+  const raw = data.choices[0].message.content || "";
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a < 0 || b < 0) return [];
+  return (JSON.parse(raw.slice(a, b + 1)).quotes || []).filter(q => q && q.quote);
+}
+
 $("go").onclick = async () => {
   const book = $("book").value.trim(), author = $("author").value.trim(), key = $("key").value.trim();
   if (!key) return status("أدخل مفتاح Groq API.", true);
   if (!book || !author) return status("أدخل اسم الكتاب واسم المؤلف.", true);
 
-  const prompt = `أنت مساعد أدبي دقيق. أعطني حتى 10 اقتباسات جميلة من كتاب "${book}" للمؤلف "${author}".
+  const FORMAT = 'أعد JSON فقط بهذا الشكل: {"quotes":[{"quote":"...","confidence":"high","note":"سياق قصير اختياري"}]}';
+  const p1 = `أنت خبير في الأدب العربي والعالمي. أعطني حتى 10 اقتباسات جميلة من كتاب "${book}" للمؤلف "${author}".
 القواعد:
-- اكتب الاقتباس بلغة الكتاب الأصلية؛ إن كان الكتاب عربيًا فاكتبه بالفصحى كما ورد قدر الإمكان.
-- اذكر ما تتذكره فعلًا من الكتاب أو من العبارات المشهورة المنسوبة إليه، ولا تختلق عبارات جديدة.
-- ضع confidence بقيمة "high" إن كنت واثقًا من النص، أو "approx" إن كنت واثقًا من المعنى والنسبة لكن الصياغة قد تختلف قليلًا.
-- إن لم تعرف الكتاب أصلًا فأعد قائمة فارغة.
+- اكتب الاقتباس بلغة الكتاب الأصلية؛ إن كان الكتاب عربيًا فاكتبه بالفصحى.
+- اذكر ما تتذكره من نصوص الكتاب أو من العبارات المشهورة المنسوبة إليه، ولا تختلق أسماء أو أحداثًا.
+- confidence: "high" إن كنت واثقًا من النص حرفيًا، و"approx" إن كنت واثقًا من المعنى ونسبته إلى الكتاب لكن الصياغة قد تختلف.
+- لا تعد قائمة فارغة إلا إذا كنت لا تعرف هذا الكتاب إطلاقًا. وإن عرفته فأعد ما تستطيع ولو 3 اقتباسات.
 - كل اقتباس جملة أو جملتان.
-أعد JSON فقط بهذا الشكل: {"quotes":[{"quote":"...","confidence":"high","note":"سياق قصير اختياري"}]}`;
+` + FORMAT;
+  const p2 = `الكتاب "${book}" للمؤلف "${author}" كتاب معروف. اذكر أبرز الأفكار والعبارات التي اشتهر بها، في صورة اقتباسات قصيرة بلغته الأصلية، بأقرب صياغة تتذكرها. اجعل confidence دائمًا "approx" ولا تختلق أحداثًا غير موجودة في الكتاب.
+` + FORMAT;
 
   $("go").disabled = true; quotes = []; render(); status("جارٍ استخراج الاقتباسات...");
   try {
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { name: "TimeoutError" })), 60000));
-    const r = await Promise.race([timeout, fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "openai/gpt-oss-120b", temperature: 0.3,
-        messages: [{ role: "user", content: prompt }]
-      })
-    })]);
-    if (!r.ok) {
-      let m = ""; try { m = (await r.json()).error.message; } catch (_) {}
-      throw new Error(r.status === 401 ? "المفتاح غير صحيح (401)" : "خطأ " + r.status + (m ? ": " + m : ""));
-    }
-    const data = await r.json();
-    const raw = data.choices[0].message.content || "";
-    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
-    quotes = (JSON.parse(raw.slice(a, b + 1)).quotes || []).filter(q => q && q.quote);
+    quotes = await ask(p1, key);
+    if (!quotes.length) { status("محاولة ثانية..."); quotes = await ask(p2, key); }
     meta = book + "، " + author;
-    if (!quotes.length) status("لم أجد اقتباسات موثوقة لهذا الكتاب.");
+    if (!quotes.length) status("لم يتعرّف النموذج على هذا الكتاب. جرّب كتابة الاسم كما هو مشهور، أو كتابًا آخر.");
     else { status("تحقق من الاقتباسات من الكتاب نفسه، فالنماذج قد تخطئ."); render(); }
   } catch (e) {
     status(e.name === "TimeoutError" ? "انتهت المهلة (60 ثانية). تحقق من الإنترنت ثم أعد المحاولة." : "تعذّر الاستخراج: " + e.message, true);
